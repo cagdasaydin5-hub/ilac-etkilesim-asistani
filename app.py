@@ -8,25 +8,31 @@ import concurrent.futures
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Hızlı Hekim Asistanı", page_icon="⚡", layout="wide")
 
+# URL'den key'i otomatik çekme
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
 st.title("⚡ Hızlı Hekim Asistanı")
 
-# --- GOOGLE SHEETS ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+# --- GOOGLE SHEETS BAĞLANTISI (HATA KORUMALI) ---
+def hafizayi_getir():
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        # ttl="10s" ile her 10 saniyede bir tabloyu yeniler
+        return conn, conn.read(ttl="10s")
+    except Exception:
+        return None, None
 
 def fda_verisi_cek(ilac_ismi):
-    """FDA verilerini paralel çekmek için hızlandırılmış fonksiyon"""
     sozluk = {"dikloron": "diclofenac", "parol": "acetaminophen", "coraspin": "aspirin"}
     temiz = ilac_ismi.lower().strip()
     arama = sozluk.get(temiz, temiz).replace(" ", "+")
     url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=1'
     try:
-        r = requests.get(url, timeout=3)
+        r = requests.get(url, timeout=4)
         if r.status_code == 200:
             d = r.json()['results'][0]
-            return f"{ilac_ismi.upper()} FDA Kaydı:\n{d.get('indications_and_usage',[''])[0][:400]}\n"
+            return f"{ilac_ismi.upper()}: {d.get('indications_and_usage',[''])[0][:400]}"
     except: return None
     return None
 
@@ -47,26 +53,27 @@ if st.button("Hızlı Analizi Başlat", type="primary"):
     drugs = sorted([d.strip().lower() for d in [i1, i2] if d.strip()])
     
     if not drugs:
-        st.warning("İlaç ismi girin.")
+        st.warning("Lütfen ilaç ismi girin.")
     else:
         query_id = ", ".join(drugs)
         
-        # 1. ADIM: HAFIZA KONTROLÜ (ÇOK HIZLI)
-        df = conn.read(ttl="5s")
-        existing = df[df['ilaclar'] == query_id]
-        
-        if not existing.empty:
-            st.success("✅ Hafızadan getirildi!")
-            st.markdown(existing.iloc[0]['rapor'])
-        else:
-            # 2. ADIM: YENİ ANALİZ
+        # 1. HAFIZA KONTROLÜ
+        conn, df = hafizayi_getir()
+        found = False
+        if df is not None:
+            existing = df[df['ilaclar'] == query_id]
+            if not existing.empty:
+                st.success("✅ Hafızadan getirildi!")
+                st.markdown(existing.iloc[0]['rapor'])
+                found = True
+
+        if not found:
+            # 2. YENİ ANALİZ
             active_key = st.session_state.get("saved_key")
             if not active_key:
-                st.error("Yeni analiz için sol tarafa API anahtarı girmelisiniz.")
+                st.error("Yeni analiz için lütfen sol menüden API anahtarınızı girin.")
             else:
-                # Durum çubuğu ile kullanıcıyı bilgilendiriyoruz
                 with st.status("Analiz hazırlanıyor...", expanded=True) as status:
-                    st.write("🔍 FDA veritabanı taranıyor...")
                     with concurrent.futures.ThreadPoolExecutor() as executor:
                         results = list(executor.map(fda_verisi_cek, drugs))
                     
@@ -75,30 +82,28 @@ if st.button("Hızlı Analizi Başlat", type="primary"):
                     if not fda_metni:
                         status.update(label="Hata: Veri bulunamadı!", state="error")
                     else:
-                        st.write("🧠 Yapay zeka raporu oluşturuyor...")
                         try:
                             genai.configure(api_key=active_key)
                             model = genai.GenerativeModel('gemini-1.5-flash-8b') 
                             
-                            prompt = f"Şu FDA verilerini doktor için çok kısa özetle ve etkileşim uyarısı yap: {fda_metni}"
-                            
-                            # CANLI YAZIM (STREAMING) BURADA BAŞLIYOR
-                            status.update(label="Analiz Tamamlanıyor...", state="running")
+                            prompt = f"Şu FDA verilerini doktor için kısa özetle ve etkileşim uyarısı yap: {fda_metni}"
                             response = model.generate_content(prompt, stream=True)
                             
-                            # Boş bir alan oluşturup cevabı oraya akıtıyoruz
                             placeholder = st.empty()
                             full_response = ""
                             for chunk in response:
                                 full_response += chunk.text
-                                placeholder.markdown(full_response + "▌") # İmleç efekti
+                                placeholder.markdown(full_response + "▌")
                             
-                            placeholder.markdown(full_response) # Final hali
-                            status.update(label="Analiz Tamamlandı ve Kaydediliyor!", state="complete")
+                            placeholder.markdown(full_response)
+                            status.update(label="Analiz Tamamlandı!", state="complete")
 
-                            # 3. ADIM: KAYIT İŞLEMİ (EN SONDA)
-                            new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [full_response]})
-                            df_updated = pd.concat([df, new_row], ignore_index=True)
-                            conn.update(data=df_updated)
+                            # 3. HAFIZAYA KAYDET (HATA VERİRSE SİSTEMİ DURDURMAZ)
+                            if conn is not None and df is not None:
+                                try:
+                                    new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [full_response]})
+                                    df_updated = pd.concat([df, new_row], ignore_index=True)
+                                    conn.update(data=df_updated)
+                                except: pass # Kaydetme hatasını görmezden gel
                         except Exception as e:
-                            st.error(f"Hata: {str(e)}")
+                            st.error(f"Yapay Zeka Hatası: {str(e)}")
