@@ -29,11 +29,15 @@ def etken_madde_bul(ticari_isim):
 
 def get_rxcui(drug_name):
     url = f"https://rxnav.nlm.nih.gov/REST/rxcui.json?name={drug_name}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        if 'idGroup' in data and 'rxnormId' in data['idGroup']:
-            return data['idGroup']['rxnormId'][0]
+    try:
+        # Sunucu takılırsa 5 saniye sonra iptal et
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if 'idGroup' in data and 'rxnormId' in data['idGroup']:
+                return data['idGroup']['rxnormId'][0]
+    except:
+        pass
     return None
 
 def check_interactions(rxcuis):
@@ -41,9 +45,12 @@ def check_interactions(rxcuis):
         return None
     cui_string = "+".join(rxcuis)
     url = f"https://rxnav.nlm.nih.gov/REST/interaction/list.json?rxcuis={cui_string}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.json()
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+    except:
+        pass
     return None
 
 # Arama kutularını yan yana koyalım
@@ -69,7 +76,10 @@ if st.button("Etkileşimleri Kontrol Et", type="primary"):
             else:
                 interactions = check_interactions([cui1, cui2])
                 
-                if 'fullInteractionTypeGroup' in interactions:
+                # GÜNCELLENEN KISIM: Veri boş mu diye kontrol ediyoruz.
+                if interactions is None:
+                    st.error("RxNav sunucusuna bağlanılamadı veya yanıt alınamadı. Lütfen tekrar deneyin.")
+                elif 'fullInteractionTypeGroup' in interactions:
                     st.error("⚠️ DİKKAT: Etkileşim Tespit Edildi!")
                     for group in interactions['fullInteractionTypeGroup']:
                         for interaction in group['fullInteractionType']:
