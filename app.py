@@ -3,112 +3,84 @@ import google.generativeai as genai
 import requests
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-import concurrent.futures
 
-# --- GENEL AYARLAR ---
-st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="🛡️", layout="wide")
+# --- SAYFA AYARLARI ---
+st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="💊")
 
+# URL'den key çekme
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
-st.title("🛡️ Hekim İlaç Asistanı (Ultra Stabil)")
+st.title("💊 Hekim İlaç Asistanı")
 
-# --- VERİTABANI BAĞLANTISI ---
+# --- HAFIZA (SADECE OKUMA) ---
 @st.cache_resource
-def get_db_conn():
+def get_conn():
     try: return st.connection("gsheets", type=GSheetsConnection)
     except: return None
 
-def hafiza_oku(conn):
-    try: return conn.read(ttl="30s")
-    except: return pd.DataFrame(columns=["ilaclar", "rapor"])
+def hafiza_kontrol(drug_names):
+    conn = get_conn()
+    if conn:
+        try:
+            df = conn.read(ttl="10m")
+            res = df[df['ilaclar'] == drug_names]
+            if not res.empty: return res.iloc[0]['rapor']
+        except: return None
+    return None
 
-# --- İLAÇ SÖZLÜĞÜ ---
-def fda_verisi_cek(ilac_ismi):
-    sozluk = {
-        "dikloron": "diclofenac", "voltaren": "diclofenac", "dolorex": "diclofenac",
-        "parol": "acetaminophen", "minoset": "acetaminophen",
-        "coraspin": "aspirin", "ecopirin": "aspirin",
-        "augmentin": "amoxicillin", "klamoks": "amoxicillin",
-        "arveles": "dexketoprofen", "majezic": "flurbiprofen"
-    }
-    temiz = ilac_ismi.lower().strip().replace('ı','i').replace('ş','s').replace('ç','c')
-    arama = sozluk.get(temiz, temiz).replace(" ", "+")
+# --- FDA SORGUSU ---
+def fda_sorgula(isim):
+    sozluk = {"dikloron": "diclofenac", "parol": "acetaminophen", "coraspin": "aspirin"}
+    arama = sozluk.get(isim.lower().strip(), isim).replace(" ", "+")
     url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=1'
     try:
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
             d = r.json()['results'][0]
-            return f"{ilac_ismi.upper()}: {d.get('indications_and_usage',[''])[0][:400]}"
+            return f"{isim.upper()}:\n{d.get('indications_and_usage',[''])[0][:500]}"
     except: return None
     return None
 
-# --- YAN MENÜ ---
+# --- GİRİŞ VE ANALİZ ---
 with st.sidebar:
-    st.header("🔑 Erişim")
-    user_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.get("saved_key", ""))
-    if user_api_key: st.session_state["saved_key"] = user_api_key
-    if st.button("Şifreyi Hatırla (Linke Göm)"):
-        st.query_params["key"] = user_api_key
-        st.success("Link güncellendi!")
+    key = st.text_input("Gemini API Key", type="password", value=st.session_state.get("saved_key", ""))
+    if key: st.session_state["saved_key"] = key
 
-# --- GİRİŞ ---
-col1, col2 = st.columns(2)
-with col1: i1 = st.text_input("1. İlaç", placeholder="Örn: Dikloron")
-with col2: i2 = st.text_input("2. İlaç", placeholder="Örn: Parol")
+i1 = st.text_input("1. İlaç")
+i2 = st.text_input("2. İlaç")
 
-if st.button("Analizi Başlat", type="primary"):
+if st.button("Analiz Et", type="primary"):
     drugs = sorted([d.strip().lower() for d in [i1, i2] if d.strip()])
     if not drugs:
         st.warning("İlaç ismi girin.")
     else:
-        query_id = ", ".join(drugs)
-        conn = get_db_conn()
-        df = hafiza_oku(conn) if conn else None
+        query = ", ".join(drugs)
         
-        found = False
-        if df is not None and not df.empty:
-            res = df[df['ilaclar'] == query_id]
-            if not res.empty:
-                st.success("✅ Hafızadan getirildi!")
-                st.markdown(res.iloc[0]['rapor'])
-                found = True
-
-        if not found:
-            active_key = st.session_state.get("saved_key")
-            if not active_key:
-                st.error("Sol menüden API anahtarınızı girin.")
+        # Önce hafızaya bak
+        rapor = hafiza_kontrol(query)
+        
+        if rapor:
+            st.success("✅ Hafızadan getirildi")
+            st.markdown(rapor)
+        else:
+            if not st.session_state.get("saved_key"):
+                st.error("Lütfen API Key girin.")
             else:
                 with st.spinner("Analiz ediliyor..."):
-                    with concurrent.futures.ThreadPoolExecutor() as ex:
-                        results = list(ex.map(fda_verisi_cek, drugs))
-                    fda_metni = "\n".join([r for r in results if r])
+                    fda_metni = ""
+                    for d in drugs:
+                        m = fda_sorgula(d)
+                        if m: fda_metni += m + "\n"
                     
                     if not fda_metni:
-                        st.error("FDA verisi bulunamadı.")
+                        st.error("Veri bulunamadı.")
                     else:
                         try:
-                            genai.configure(api_key=active_key)
-                            
-                            # --- MODEL SEÇİCİ (404 HATASINI BİTİREN KISIM) ---
-                            model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
-                            response = None
-                            
-                            for m_name in model_names:
-                                try:
-                                    model = genai.GenerativeModel(m_name)
-                                    response = model.generate_content(f"Doktor için kısa Türkçe özet ve etkileşim raporu: {fda_metni}")
-                                    if response: break
-                                except Exception: continue # Eğer bu model 404 verirse bir sonrakini dene
-                            
-                            if response:
-                                st.markdown(response.text)
-                                if conn:
-                                    try:
-                                        new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [response.text]})
-                                        conn.update(data=pd.concat([df, new_row], ignore_index=True))
-                                    except: pass
-                            else:
-                                st.error("Google şu an hiçbir modeline izin vermiyor. Lütfen 5 dakika bekleyin.")
+                            genai.configure(api_key=st.session_state["saved_key"])
+                            # EN STABİL MODEL İSMİ
+                            model = genai.GenerativeModel('gemini-1.5-flash')
+                            response = model.generate_content(f"Doktor için kısa özetle: {fda_metni}")
+                            st.markdown(response.text)
                         except Exception as e:
-                            st.error(f"Hata: {str(e)}")
+                            st.error(f"Google Hatası: {str(e)}")
