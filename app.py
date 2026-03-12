@@ -49,4 +49,5 @@ if st.button("Yapay Zeka ile Analiz Et", type="primary"):
                 st.write(response.text)
                 
             except Exception as e:
-                st.error("Yapay zeka ile iletişimde bir hata oluştu. Lütfen Streamlit ayarlarındaki 'Secrets' kısmını kontrol edin.")
+                # HATANIN DETAYINI BURADA YAZDIRIYORUZ
+                st.error(f"Hata Detayı: {str(e)}")
