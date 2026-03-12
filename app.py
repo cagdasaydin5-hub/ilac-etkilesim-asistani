@@ -10,26 +10,25 @@ st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="💊", layout
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
-st.title("🛡️ Hekim İlaç Asistanı (Form Seçenekli)")
+st.title("🛡️ Hekim İlaç Asistanı (Nokta Atışı)")
 
 @st.cache_resource
 def get_db():
     try: return st.connection("gsheets", type=GSheetsConnection)
     except: return None
 
-def fda_verisi_cek(ilac, form_filtresi):
-    sozluk = {"dikloron": "diclofenac", "parol": "acetaminophen", "coraspin": "aspirin", "augmentin": "amoxicillin"}
+def fda_verisi_cek(ilac):
+    sozluk = {"dikloron": "diclofenac", "parol": "acetaminophen", "coraspin": "aspirin"}
     arama = sozluk.get(ilac.lower().strip(), ilac).replace(" ", "+")
-    
-    # Seçilen forma göre FDA sorgusunu biraz daha spesifikleştiriyoruz
+    # Tüm formları yakalamak için limit=10 devam ediyor, filtrelemeyi AI yapacak
     url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=10'
     try:
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
             res = r.json()['results']
-            metin = f"SEÇİLEN FORM: {form_filtresi}\n"
+            metin = ""
             for d in res:
-                metin += f"\n[KAYIT]: {d.get('dosage_and_administration',[''])[0][:800]}\n"
+                metin += f"\n[VERİ]: {d.get('dosage_and_administration',[''])[0][:800]}\n"
             return metin
     except: return None
     return None
@@ -39,18 +38,15 @@ with st.sidebar:
     st.header("🔑 Erişim")
     key = st.text_input("Gemini API Key", type="password", value=st.session_state.get("saved_key", ""))
     if key: st.session_state["saved_key"] = key
-    if st.button("Şifreyi Linke Göm"):
-        st.query_params["key"] = key
-        st.success("Link güncellendi!")
 
 # --- GİRİŞ VE SEÇENEKLER ---
 col1, col2 = st.columns(2)
 with col1:
     i1 = st.text_input("1. İlaç", placeholder="Örn: Dikloron")
-    f1 = st.selectbox("Form Seçin (1)", ["Hepsi", "Oral (Tablet/Kapsül)", "IM/IV (Ampul)", "Topikal (Jel/Krem)"], key="f1")
+    f1 = st.selectbox("Form Seçin (1)", ["Oral", "IM/IV", "Topikal"], key="f1")
 with col2:
     i2 = st.text_input("2. İlaç", placeholder="Örn: Parol")
-    f2 = st.selectbox("Form Seçin (2)", ["Hepsi", "Oral (Tablet/Kapsül)", "IM/IV (Ampul)", "Topikal (Jel/Krem)"], key="f2")
+    f2 = st.selectbox("Form Seçin (2)", ["Oral", "IM/IV", "Topikal"], key="f2")
 
 if st.button("Klinik Analizi Başlat", type="primary"):
     drugs_with_forms = []
@@ -58,11 +54,9 @@ if st.button("Klinik Analizi Başlat", type="primary"):
     if i2: drugs_with_forms.append((i2, f2))
     
     if not drugs_with_forms:
-        st.warning("Lütfen ilaç ismi girin.")
+        st.warning("İlaç ismi girin.")
     else:
-        # Hafıza ID'si için form bilgisini de ekliyoruz
         query_id = " & ".join([f"{d}({f})" for d, f in drugs_with_forms])
-        
         conn = get_db()
         found_rapor = None
         if conn:
@@ -79,11 +73,13 @@ if st.button("Klinik Analizi Başlat", type="primary"):
             if not st.session_state.get("saved_key"):
                 st.error("API Key gerekli.")
             else:
-                with st.spinner(f"Seçilen formlar analiz ediliyor..."):
+                with st.spinner(f"Sadece seçilen formlar süzülüyor..."):
                     fda_metni = ""
+                    secim_ozeti = ""
                     for d, f in drugs_with_forms:
-                        m = fda_verisi_cek(d, f)
-                        if m: fda_metni += m
+                        m = fda_verisi_cek(d)
+                        if m: fda_metni += f"\n--- {d.upper()} İÇİN VERİ SETİ ---\n" + m
+                        secim_ozeti += f"{d.upper()} için SADECE {f} formunu analiz et.\n"
                     
                     if not fda_metni:
                         st.error("FDA veritabanında bilgi bulunamadı.")
@@ -92,13 +88,18 @@ if st.button("Klinik Analizi Başlat", type="primary"):
                             genai.configure(api_key=st.session_state["saved_key"])
                             model = genai.GenerativeModel('gemini-2.5-flash')
                             
+                            # --- SERT FİLTRELEME PROMPTU ---
                             prompt = f"""
-                            Sen bir tıp asistanısın. Aşağıdaki verileri kullanarak NET BİR TABLO oluştur.
+                            Sen bir klinik asistanısın. Aşağıdaki verilerden SADECE istenen formları ayıkla ve tablo yap.
                             
-                            ÖNEMLİ: 
-                            - Eğer kullanıcı belirli bir form (Oral, IM/IV, Topikal) seçmişse, tabloya ÖNCELİKLE O FORMU yaz.
-                            - Format sadece tablo olsun. Giriş/sonuç cümlesi yazma.
-                            - Kolonlar: [İlaç / Seçilen Form], [Gebelik / Emzirme], [Erişkin Doz], [Pediatrik Doz (mg/kg)], [Kritik Uyarılar].
+                            KULLANICI SEÇİMİ:
+                            {secim_ozeti}
+
+                            KESİN KURALLAR:
+                            1. Tabloda seçilen form dışında (örn. kullanıcı IM seçtiyse Oral veya Jel) HİÇBİR satır veya bilgi olmayacak.
+                            2. Tablo kolonları: [İlaç], [Seçilen Form], [Gebelik/Emzirme], [Erişkin Doz], [Pediatrik Doz (mg/kg)], [Kritik Uyarılar].
+                            3. Giriş/Sonuç cümlesi yazma. Sadece tabloyu ver.
+                            4. Seçilen form veride yoksa "Bu form için spesifik veri bulunamadı" yaz.
 
                             FDA VERİLERİ:
                             {fda_metni}
