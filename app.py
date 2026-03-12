@@ -31,8 +31,8 @@ if st.button("Yapay Zeka ile Analiz Et", type="primary"):
             try:
                 genai.configure(api_key=api_key)
                 
-                # GÜNCELLENEN KISIM: Model ismini en stabil versiyon olan 'gemini-pro' yaptık
-                model = genai.GenerativeModel('gemini-pro') 
+                # GÜNCELLENEN KISIM: Google'ın şu an yayında olan aktif modelini kullanıyoruz
+                model = genai.GenerativeModel('gemini-2.5-flash') 
                 
                 prompt = f"""
                 Sen uzman bir klinik farmakologsun. Bir hekim aşağıdaki ilaçları aynı hastaya reçete etmeyi düşünüyor:
