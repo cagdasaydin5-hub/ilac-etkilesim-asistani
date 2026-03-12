@@ -3,115 +3,155 @@ import google.generativeai as genai
 import requests
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
+import time
 
-# Sayfa Ayarları
+# --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="💊", layout="wide")
 
-# --- ÖNEMLİ: TARAYICI HAFIZASI (LOCAL STORAGE) ---
-# Bu script, API anahtarını kullanıcının tarayıcısına güvenli bir şekilde kaydeder.
-def save_key_to_browser(key):
-    st.session_state["saved_api_key"] = key
-    # Streamlit doğrudan local storage yazamaz, ancak session_state ile bu oturumda tutarız.
-    # Tarayıcıların "Şifre Hatırla" özelliği 'type="password"' alanlarında otomatik devreye girer.
+# --- URL'DEN ANAHTAR OKUMA (OTOMATİK HATIRLAMA) ---
+if "key" in st.query_params:
+    st.session_state["saved_key"] = st.query_params["key"]
 
 st.title("💊 Hekim İlaç Asistanı (Kolektif Hafıza)")
-st.markdown("""
-<div style="background-color: #f0f2f6; padding: 10px; border-radius: 5px;">
-    <strong>Nasıl Çalışır?</strong><br>
-    1. İlaçları yazın ve sorgulayın.<br>
-    2. Eğer bu kombinasyon daha önce analiz edildiyse <strong>ücretsiz ve anında</strong> rapor gelir.<br>
-    3. Yeni bir analiz ise API anahtarınızı bir kez girmeniz yeterlidir.
-</div>
-""", unsafe_allow_html=True)
+
+# --- DARK MODE UYUMLU BİLGİ KUTUSU ---
+with st.expander("❓ Sistem Nasıl Çalışır? (Okumak için tıklayın)", expanded=True):
+    st.info("""
+    - **Ücretsiz Erişim:** Daha önce bir meslektaşınız tarafından analiz edilmiş ilaçlar hafızadan anında ve şifresiz gelir.
+    - **Yeni Analiz:** Eğer ilaç kombinasyonu ilk kez sorgulanıyorsa, kendi Gemini API anahtarınızı girmeniz gerekir.
+    - **Kolektif Katkı:** Yaptığınız her yeni analiz sisteme kaydedilir ve sizden sonraki tüm doktorlar için ücretsiz olur.
+    """)
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
-conn = st.connection("gsheets", type=GSheetsConnection)
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+except Exception as e:
+    st.error("Google Sheets bağlantısı kurulamadı. Lütfen Secrets ayarlarını kontrol edin.")
 
-def get_from_cache(query_key):
+def fda_verisi_cek(ilac_ismi):
+    """FDA veritabanından ham prospektüs verisini çeker"""
+    sozluk = {
+        "parol": "acetaminophen", "minoset": "acetaminophen", 
+        "coraspin": "aspirin", "verxant": "secukinumab", 
+        "augmentin": "amoxicillin", "klamoks": "amoxicillin",
+        "majezic": "flurbiprofen", "aprol": "naproxen"
+    }
+    arama = sozluk.get(ilac_ismi.lower(), ilac_ismi).replace(" ", "+")
+    url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=1'
     try:
-        df = conn.read(ttl="0") # Her zaman en güncel tabloya bak
-        res = df[df['ilaclar'] == query_key]
-        if not res.empty:
-            return res.iloc[0]['rapor']
+        response = requests.get(url, timeout=7)
+        if response.status_code == 200:
+            data = response.json()['results'][0]
+            return f"""
+            --- {ilac_ismi.upper()} RESMİ VERİSİ ---
+            Endikasyon: {data.get('indications_and_usage', [''])[0][:800]}
+            Dozaj: {data.get('dosage_and_administration', [''])[0][:800]}
+            Uyarılar: {data.get('warnings', data.get('boxed_warning', ['']))[0][:800]}
+            Etkileşimler: {data.get('drug_interactions', [''])[0][:800]}
+            """
     except: return None
     return None
 
-def save_to_cache(query_key, report):
-    try:
-        df_existing = conn.read()
-        new_data = pd.DataFrame({"ilaclar": [query_key], "rapor": [report]})
-        updated_df = pd.concat([df_existing, new_data], ignore_index=True)
-        conn.update(data=updated_df)
-    except: pass
-
-# --- YAN MENÜ: API AYARLARI ---
+# --- YAN MENÜ: ERİŞİM VE HATIRLATICI ---
 with st.sidebar:
     st.header("🔑 Erişim Ayarları")
-    # type="password" sayesinde tarayıcılar "Şifreyi Kaydet" teklifi sunar.
-    user_api_key = st.text_input(
+    current_key = st.text_input(
         "Gemini API Anahtarınız", 
         type="password", 
-        value=st.session_state.get("saved_api_key", ""),
-        help="Anahtarınız tarayıcınız tarafından hatırlanacaktır."
+        value=st.session_state.get("saved_key", ""),
+        help="Anahtarınız tarayıcınızda güvenle saklanacaktır."
     )
-    if user_api_key:
-        save_key_to_browser(user_api_key)
+    if current_key:
+        st.session_state["saved_key"] = current_key
         
+    if st.button("Şifremi bu linke göm ve hatırla"):
+        st.query_params["key"] = current_key
+        st.success("Link güncellendi! Sayfayı 'Sık Kullanılanlara' eklerseniz anahtarınız otomatik yüklenecektir.")
+
     st.markdown("[🔑 Ücretsiz Anahtar Al](https://aistudio.google.com/app/apikey)")
     st.divider()
-    st.info("Kolektif hafıza sayesinde popüler sorgular zamanla tamamen ücretsiz hale gelecektir.")
+    st.caption("Kolektif hafıza sayesinde sistem zamanla tamamen ücretsiz hale gelecektir.")
 
-# --- İLAÇ GİRİŞ VE ANALİZ ---
+# --- İLAÇ GİRİŞ ALANLARI ---
 col1, col2 = st.columns(2)
 with col1:
-    d1 = st.text_input("1. İlaç", placeholder="Örn: Verxant")
-    d3 = st.text_input("3. İlaç")
+    i1 = st.text_input("1. İlaç", placeholder="Örn: Arveles")
+    i3 = st.text_input("3. İlaç")
 with col2:
-    d2 = st.text_input("2. İlaç", placeholder="Örn: Coraspin")
-    d4 = st.text_input("4. İlaç")
+    i2 = st.text_input("2. İlaç", placeholder="Örn: Coraspin")
+    i4 = st.text_input("4. İlaç")
 
+# --- ANALİZ MANTIĞI ---
 if st.button("Klinik Analizi Başlat", type="primary"):
-    selected_drugs = sorted([d.strip().lower() for d in [d1, d2, d3, d4] if d.strip()])
+    drugs = sorted([d.strip().lower() for d in [i1, i2, i3, i4] if d.strip()])
     
-    if not selected_drugs:
-        st.warning("Lütfen en az bir ilaç girin.")
+    if not drugs:
+        st.warning("Lütfen analiz için en az bir ilaç ismi girin.")
     else:
-        query_key = ", ".join(selected_drugs)
+        query_id = ", ".join(drugs)
         
-        # 1. ÖNCE KOLEKTİF HAFIZAYA BAK (ÜCRETSİZ)
+        # 1. KOLEKTİF HAFIZA KONTROLÜ
         with st.spinner("Kolektif hafıza taranıyor..."):
-            cached_report = get_from_cache(query_key)
+            try:
+                df = conn.read(ttl="5s")
+                existing = df[df['ilaclar'] == query_id]
+                found = not existing.empty
+            except: 
+                found = False
+                df = pd.DataFrame(columns=["ilaclar", "rapor"])
         
-        if cached_report:
+        if found:
             st.success("✅ Bu analiz kolektif hafızadan getirildi (Ücretsiz)")
-            st.markdown(cached_report)
+            st.markdown(existing.iloc[0]['rapor'])
         else:
-            # 2. HAFIZADA YOKSA KULLANICI ANAHTARIYLA YENİ ANALİZ
-            if not user_api_key:
-                st.error("❌ Bu kombinasyon henüz analiz edilmemiş. Analizi başlatmak için sol menüden kendi API anahtarınızı girin.")
+            # 2. HAFIZADA YOKSA YENİ ANALİZ
+            if not st.session_state.get("saved_key"):
+                st.error("❌ Bu kombinasyon henüz analiz edilmemiş. Lütfen sol menüden API anahtarınızı girin.")
             else:
-                with st.spinner("Yeni analiz yapılıyor (FDA + Yapay Zeka)..."):
-                    try:
-                        # (Burada FDA veri çekme fonksiyonlarını önceki kodlardaki gibi eklemelisin)
-                        # Özetle: FDA'dan çek, Gemini'ye yolla.
-                        
-                        # --- TEMSİLİ ANALİZ SÜRECİ ---
-                        genai.configure(api_key=user_api_key)
-                        model = genai.GenerativeModel('gemini-2.0-flash') # En güncel model
-                        
-                        # FDA Veri Çekme (Basitleştirilmiş)
-                        # ... (Önceki fda_cek fonksiyonu buraya gelecek) ...
-                        
-                        prompt = f"{query_key} ilaçları için prospektüs özeti ve etkileşim raporu hazırla."
-                        response = model.generate_content(prompt)
-                        report_text = response.text
-                        
-                        st.markdown(report_text)
-                        
-                        # 3. YENİ ANALİZİ HAFIZAYA KAYDET
-                        save_to_cache(query_key, report_text)
-                        st.balloons()
-                        st.info("💡 Bu analiz kolektif hafızaya eklendi! Artık tüm meslektaşlarınız için ücretsiz.")
-                        
-                    except Exception as e:
-                        st.error(f"Bir hata oluştu: {str(e)}")
+                with st.spinner("FDA verileri çekiliyor ve YZ raporu hazırlanıyor..."):
+                    fda_metni = ""
+                    for d in drugs:
+                        m = fda_verisi_cek(d)
+                        if m: fda_metni += m
+                    
+                    if not fda_metni:
+                        st.error("Girdiğiniz ilaçlar FDA veritabanında bulunamadı. Lütfen etken maddeyi kontrol edin.")
+                    else:
+                        try:
+                            genai.configure(api_key=st.session_state["saved_key"])
+                            model = genai.GenerativeModel('gemini-2.0-flash')
+                            
+                            prompt = f"""
+                            Sen uzman bir klinik farmakologsun. Sadece şu resmi FDA verilerini kullanarak Türkçe özet hazırla:
+                            {fda_metni}
+                            
+                            Rapor Formatı:
+                            1. Etken Madde ve Sınıf
+                            2. Pozoloji (Bebek, Çocuk, Yetişkin, Geriatrik - Ayrı başlıklarla ve veride varsa mg/kg hesabı ile)
+                            3. Gebelik ve Emzirme Riskleri (Kategori belirterek)
+                            4. Önemli Yan Etkiler ve İlaç Etkileşimleri
+                            
+                            Önemli: Veride olmayan bilgiyi asla uydurma, 'Veri yok' de.
+                            """
+                            
+                            # 429 Hatası için basit bir retry (tekrar deneme)
+                            for attempt in range(2):
+                                try:
+                                    response = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=0.0))
+                                    rapor = response.text
+                                    st.markdown(rapor)
+                                    
+                                    # 3. YENİ ANALİZİ HAFIZAYA KAYDET
+                                    new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [rapor]})
+                                    df_updated = pd.concat([df, new_row], ignore_index=True)
+                                    conn.update(data=df_updated)
+                                    st.balloons()
+                                    st.info("💡 Analiz tamamlandı ve kolektif hafızaya kaydedildi!")
+                                    break
+                                except Exception as e:
+                                    if "429" in str(e) and attempt == 0:
+                                        time.sleep(3)
+                                        continue
+                                    else: raise e
+                        except Exception as e:
+                            st.error(f"Bir hata oluştu: {str(e)}")
