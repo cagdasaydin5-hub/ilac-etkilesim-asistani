@@ -5,22 +5,28 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import concurrent.futures
 
+# --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="💊", layout="wide")
 
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
-st.title("🛡️ Hekim İlaç Asistanı (Nokta Atışı)")
+st.title("🛡️ Hekim İlaç Asistanı v6.0")
+st.warning("⚠️ **DİKKAT:** Veriler FDA bazlıdır. Türkiye ruhsatları farklılık gösterebilir. Son karar hekimindir.")
 
+# --- VERİTABANI BAĞLANTISI ---
 @st.cache_resource
 def get_db():
     try: return st.connection("gsheets", type=GSheetsConnection)
     except: return None
 
 def fda_verisi_cek(ilac):
-    sozluk = {"dikloron": "diclofenac", "parol": "acetaminophen", "coraspin": "aspirin"}
+    sozluk = {
+        "dikloron": "diclofenac", "voltaren": "diclofenac", "parol": "acetaminophen",
+        "coraspin": "aspirin", "augmentin": "amoxicillin", "klamoks": "amoxicillin"
+    }
     arama = sozluk.get(ilac.lower().strip(), ilac).replace(" ", "+")
-    # Tüm formları yakalamak için limit=10 devam ediyor, filtrelemeyi AI yapacak
+    # Formları yakalamak için derin tarama
     url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=10'
     try:
         r = requests.get(url, timeout=5)
@@ -28,7 +34,8 @@ def fda_verisi_cek(ilac):
             res = r.json()['results']
             metin = ""
             for d in res:
-                metin += f"\n[VERİ]: {d.get('dosage_and_administration',[''])[0][:800]}\n"
+                metin += f"\n[KAYIT]: {d.get('dosage_and_administration',[''])[0][:800]}\n"
+                metin += f"[GEBELIK]: {d.get('pregnancy',[''])[0][:300]}\n"
             return metin
     except: return None
     return None
@@ -38,6 +45,9 @@ with st.sidebar:
     st.header("🔑 Erişim")
     key = st.text_input("Gemini API Key", type="password", value=st.session_state.get("saved_key", ""))
     if key: st.session_state["saved_key"] = key
+    if st.button("Şifreyi Linke Göm"):
+        st.query_params["key"] = key
+        st.success("Link güncellendi!")
 
 # --- GİRİŞ VE SEÇENEKLER ---
 col1, col2 = st.columns(2)
@@ -54,11 +64,12 @@ if st.button("Klinik Analizi Başlat", type="primary"):
     if i2: drugs_with_forms.append((i2, f2))
     
     if not drugs_with_forms:
-        st.warning("İlaç ismi girin.")
+        st.warning("Lütfen ilaç ismi girin.")
     else:
         query_id = " & ".join([f"{d}({f})" for d, f in drugs_with_forms])
         conn = get_db()
         found_rapor = None
+        
         if conn:
             try:
                 df = conn.read(ttl="5s")
@@ -73,34 +84,36 @@ if st.button("Klinik Analizi Başlat", type="primary"):
             if not st.session_state.get("saved_key"):
                 st.error("API Key gerekli.")
             else:
-                with st.spinner(f"Sadece seçilen formlar süzülüyor..."):
+                with st.spinner("Veriler süzülüyor..."):
                     fda_metni = ""
                     secim_ozeti = ""
                     for d, f in drugs_with_forms:
                         m = fda_verisi_cek(d)
-                        if m: fda_metni += f"\n--- {d.upper()} İÇİN VERİ SETİ ---\n" + m
-                        secim_ozeti += f"{d.upper()} için SADECE {f} formunu analiz et.\n"
+                        if m: 
+                            fda_metni += f"\n--- {d.upper()} VERİ SETİ ---\n" + m
+                            secim_ozeti += f"- {d.upper()} için SADECE {f} formuna odaklan.\n"
                     
                     if not fda_metni:
                         st.error("FDA veritabanında bilgi bulunamadı.")
                     else:
                         try:
                             genai.configure(api_key=st.session_state["saved_key"])
+                            # En stabil 2026 modeli
                             model = genai.GenerativeModel('gemini-2.5-flash')
                             
-                            # --- SERT FİLTRELEME PROMPTU ---
                             prompt = f"""
-                            Sen bir klinik asistanısın. Aşağıdaki verilerden SADECE istenen formları ayıkla ve tablo yap.
-                            
-                            KULLANICI SEÇİMİ:
-                            {secim_ozeti}
+                            Sen bir klinik asistanısın. Aşağıdaki verileri kullanarak NET BİR TABLO oluştur.
 
                             KESİN KURALLAR:
-                            1. Tabloda seçilen form dışında (örn. kullanıcı IM seçtiyse Oral veya Jel) HİÇBİR satır veya bilgi olmayacak.
-                            2. Tablo kolonları: [İlaç], [Seçilen Form], [Gebelik/Emzirme], [Erişkin Doz], [Pediatrik Doz (mg/kg)], [Kritik Uyarılar].
-                            3. Giriş/Sonuç cümlesi yazma. Sadece tabloyu ver.
-                            4. Seçilen form veride yoksa "Bu form için spesifik veri bulunamadı" yaz.
+                            1. HTML ETİKETLERİ YASAK: Asla <br>, <b>, <ul> gibi etiketler kullanma. Sadece düz metin kullan.
+                            2. GEBELİK KATEGORİSİ: Eğer veride kategori (A,B,C,D,X) yazmıyorsa, genel tıbbi bilgini kullanarak "C (Klinik Bilgi)" gibi bir değer ata. Asla boş bırakma.
+                            3. TABLO YAPISI: Sadece Markdown tablosu olsun. Başka hiçbir açıklama yazma.
+                            4. KULLANICI SEÇİMİNE SADIK KAL:
+                            {secim_ozeti}
 
+                            KOLONLAR:
+                            | İlaç (Form) | Gebelik / Emzirme | Erişkin Doz | Pediatrik Doz (mg/kg) | Kritik Uyarılar |
+                            
                             FDA VERİLERİ:
                             {fda_metni}
                             """
