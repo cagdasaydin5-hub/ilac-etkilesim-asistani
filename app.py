@@ -5,13 +5,13 @@ import pandas as pd
 from streamlit_gsheets import GSheetsConnection
 import concurrent.futures
 
-# --- AYARLAR ---
+# --- GENEL AYARLAR ---
 st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="🛡️", layout="wide")
 
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
-st.title("🛡️ Hekim İlaç Asistanı (Kararlı Sürüm)")
+st.title("🛡️ Hekim İlaç Asistanı (Ultra Stabil)")
 
 # --- VERİTABANI BAĞLANTISI ---
 @st.cache_resource
@@ -20,10 +20,10 @@ def get_db_conn():
     except: return None
 
 def hafiza_oku(conn):
-    try: return conn.read(ttl="60s")
+    try: return conn.read(ttl="30s")
     except: return pd.DataFrame(columns=["ilaclar", "rapor"])
 
-# --- İLAÇ SÖZLÜĞÜ VE FDA ---
+# --- İLAÇ SÖZLÜĞÜ ---
 def fda_verisi_cek(ilac_ismi):
     sozluk = {
         "dikloron": "diclofenac", "voltaren": "diclofenac", "dolorex": "diclofenac",
@@ -32,7 +32,7 @@ def fda_verisi_cek(ilac_ismi):
         "augmentin": "amoxicillin", "klamoks": "amoxicillin",
         "arveles": "dexketoprofen", "majezic": "flurbiprofen"
     }
-    temiz = ilac_ismi.lower().strip().replace('ı','i').replace('ş','s')
+    temiz = ilac_ismi.lower().strip().replace('ı','i').replace('ş','s').replace('ç','c')
     arama = sozluk.get(temiz, temiz).replace(" ", "+")
     url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=1'
     try:
@@ -48,9 +48,9 @@ with st.sidebar:
     st.header("🔑 Erişim")
     user_api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.get("saved_key", ""))
     if user_api_key: st.session_state["saved_key"] = user_api_key
-    if st.button("Şifreyi Hatırla"):
+    if st.button("Şifreyi Hatırla (Linke Göm)"):
         st.query_params["key"] = user_api_key
-        st.success("Link güncellendi! Bookmark yapın.")
+        st.success("Link güncellendi!")
 
 # --- GİRİŞ ---
 col1, col2 = st.columns(2)
@@ -77,7 +77,7 @@ if st.button("Analizi Başlat", type="primary"):
         if not found:
             active_key = st.session_state.get("saved_key")
             if not active_key:
-                st.error("API anahtarınızı girin.")
+                st.error("Sol menüden API anahtarınızı girin.")
             else:
                 with st.spinner("Analiz ediliyor..."):
                     with concurrent.futures.ThreadPoolExecutor() as ex:
@@ -89,13 +89,26 @@ if st.button("Analizi Başlat", type="primary"):
                     else:
                         try:
                             genai.configure(api_key=active_key)
-                            model = genai.GenerativeModel('gemini-1.5-flash') 
-                            response = model.generate_content(f"Kısa Türkçe özet ve etkileşim raporu: {fda_metni}")
-                            st.markdown(response.text)
-                            if conn:
+                            
+                            # --- MODEL SEÇİCİ (404 HATASINI BİTİREN KISIM) ---
+                            model_names = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
+                            response = None
+                            
+                            for m_name in model_names:
                                 try:
-                                    new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [response.text]})
-                                    conn.update(data=pd.concat([df, new_row], ignore_index=True))
-                                except: pass
+                                    model = genai.GenerativeModel(m_name)
+                                    response = model.generate_content(f"Doktor için kısa Türkçe özet ve etkileşim raporu: {fda_metni}")
+                                    if response: break
+                                except Exception: continue # Eğer bu model 404 verirse bir sonrakini dene
+                            
+                            if response:
+                                st.markdown(response.text)
+                                if conn:
+                                    try:
+                                        new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [response.text]})
+                                        conn.update(data=pd.concat([df, new_row], ignore_index=True))
+                                    except: pass
+                            else:
+                                st.error("Google şu an hiçbir modeline izin vermiyor. Lütfen 5 dakika bekleyin.")
                         except Exception as e:
                             st.error(f"Hata: {str(e)}")
