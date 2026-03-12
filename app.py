@@ -8,42 +8,57 @@ import time
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="Hekim İlaç Asistanı", page_icon="💊", layout="wide")
 
-# --- URL'DEN ANAHTAR OKUMA (OTOMATİK HATIRLAMA) ---
+# --- URL'DEN ANAHTAR OKUMA ---
 if "key" in st.query_params:
     st.session_state["saved_key"] = st.query_params["key"]
 
 st.title("💊 Hekim İlaç Asistanı (Kolektif Hafıza)")
 
-# --- DARK MODE UYUMLU BİLGİ KUTUSU ---
-with st.expander("❓ Sistem Nasıl Çalışır? (Okumak için tıklayın)", expanded=True):
+# --- DARK MODE UYUMLU REHBER ---
+with st.expander("❓ Sistem Nasıl Çalışır? (Kullanım Rehberi)", expanded=True):
     st.info("""
-    - **Ücretsiz Erişim:** Daha önce bir meslektaşınız tarafından analiz edilmiş ilaçlar hafızadan anında ve şifresiz gelir.
-    - **Yeni Analiz:** Eğer ilaç kombinasyonu ilk kez sorgulanıyorsa, kendi Gemini API anahtarınızı girmeniz gerekir.
-    - **Kolektif Katkı:** Yaptığınız her yeni analiz sisteme kaydedilir ve sizden sonraki tüm doktorlar için ücretsiz olur.
+    - **Ücretsiz Erişim:** Daha önce analiz edilmiş ilaçlar hafızadan anında ve şifresiz gelir.
+    - **Yeni Analiz:** İlk kez sorgulanan ilaçlar için kendi Gemini API anahtarınızı girmeniz istenir.
+    - **Kolektif Katkı:** Yaptığınız her analiz sisteme kaydedilir ve tüm hekimler için ücretsiz olur.
+    - **İpucu:** İlaç bulunamazsa lütfen **etken maddesini** (örn: Diclofenac) yazmayı deneyin.
     """)
 
 # --- GOOGLE SHEETS BAĞLANTISI ---
 try:
     conn = st.connection("gsheets", type=GSheetsConnection)
 except Exception as e:
-    st.error("Google Sheets bağlantısı kurulamadı. Lütfen Secrets ayarlarını kontrol edin.")
+    st.error("Veritabanı bağlantı hatası. Lütfen Secrets kısmını kontrol edin.")
 
 def fda_verisi_cek(ilac_ismi):
-    """FDA veritabanından ham prospektüs verisini çeker"""
+    """FDA veritabanından veri çeker. Türkçe ticari isimleri İngilizce jenerik isimlere çevirir."""
+    # TÜRKİYE'DE YAYGIN İLAÇLAR SÖZLÜĞÜ (Genişletildi)
     sozluk = {
-        "parol": "acetaminophen", "minoset": "acetaminophen", 
-        "coraspin": "aspirin", "verxant": "secukinumab", 
-        "augmentin": "amoxicillin", "klamoks": "amoxicillin",
-        "majezic": "flurbiprofen", "aprol": "naproxen"
+        "parol": "acetaminophen", "minoset": "acetaminophen", "tamol": "acetaminophen",
+        "coraspin": "aspirin", "ecopirin": "aspirin",
+        "verxant": "secukinumab", 
+        "augmentin": "amoxicillin", "klamoks": "amoxicillin", "amoklavin": "amoxicillin",
+        "dikloron": "diclofenac", "voltaren": "diclofenac", "dolorex": "diclofenac",
+        "arveles": "dexketoprofen", "dexday": "dexketoprofen",
+        "apranax": "naproxen", "aprol": "naproxen",
+        "majezic": "flurbiprofen",
+        "buscopan": "hyoscine",
+        "lansor": "lansoprazole",
+        "beloc": "metoprolol",
+        "lipitor": "atorvastatin",
+        "glifor": "metformin", "matofin": "metformin"
     }
-    arama = sozluk.get(ilac_ismi.lower(), ilac_ismi).replace(" ", "+")
-    url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama}"+OR+openfda.brand_name:"{arama}")&limit=1'
+    
+    # Türkçe karakter temizliği ve sözlük kontrolü
+    temiz_isim = ilac_ismi.lower().replace('ı', 'i').replace('ş', 's').replace('ç', 'c').replace('ğ', 'g').replace('ü', 'u').replace('ö', 'o')
+    arama_terimi = sozluk.get(temiz_isim, temiz_isim).replace(" ", "+")
+    
+    url = f'https://api.fda.gov/drug/label.json?search=(openfda.generic_name:"{arama_terimi}"+OR+openfda.brand_name:"{arama_terimi}")&limit=1'
     try:
         response = requests.get(url, timeout=7)
         if response.status_code == 200:
             data = response.json()['results'][0]
             return f"""
-            --- {ilac_ismi.upper()} RESMİ VERİSİ ---
+            --- {ilac_ismi.upper()} ---
             Endikasyon: {data.get('indications_and_usage', [''])[0][:800]}
             Dozaj: {data.get('dosage_and_administration', [''])[0][:800]}
             Uyarılar: {data.get('warnings', data.get('boxed_warning', ['']))[0][:800]}
@@ -52,46 +67,42 @@ def fda_verisi_cek(ilac_ismi):
     except: return None
     return None
 
-# --- YAN MENÜ: ERİŞİM VE HATIRLATICI ---
+# --- YAN MENÜ ---
 with st.sidebar:
     st.header("🔑 Erişim Ayarları")
-    current_key = st.text_input(
-        "Gemini API Anahtarınız", 
-        type="password", 
-        value=st.session_state.get("saved_key", ""),
-        help="Anahtarınız tarayıcınızda güvenle saklanacaktır."
-    )
+    current_key = st.text_input("Gemini API Anahtarınız", type="password", value=st.session_state.get("saved_key", ""))
+    
     if current_key:
         st.session_state["saved_key"] = current_key
         
     if st.button("Şifremi bu linke göm ve hatırla"):
         st.query_params["key"] = current_key
-        st.success("Link güncellendi! Sayfayı 'Sık Kullanılanlara' eklerseniz anahtarınız otomatik yüklenecektir.")
+        st.success("Link güncellendi! Sık kullanılanlara (Bookmark) eklemeyi unutmayın.")
 
     st.markdown("[🔑 Ücretsiz Anahtar Al](https://aistudio.google.com/app/apikey)")
     st.divider()
-    st.caption("Kolektif hafıza sayesinde sistem zamanla tamamen ücretsiz hale gelecektir.")
+    st.caption("Kolektif hafıza geliştikçe şifre gereksinimi azalacaktır.")
 
-# --- İLAÇ GİRİŞ ALANLARI ---
+# --- GİRİŞ ALANLARI ---
 col1, col2 = st.columns(2)
 with col1:
-    i1 = st.text_input("1. İlaç", placeholder="Örn: Arveles")
+    i1 = st.text_input("1. İlaç", placeholder="Örn: Dikloron")
     i3 = st.text_input("3. İlaç")
 with col2:
-    i2 = st.text_input("2. İlaç", placeholder="Örn: Coraspin")
+    i2 = st.text_input("2. İlaç", placeholder="Örn: Coumadin")
     i4 = st.text_input("4. İlaç")
 
-# --- ANALİZ MANTIĞI ---
+# --- ANALİZ ---
 if st.button("Klinik Analizi Başlat", type="primary"):
     drugs = sorted([d.strip().lower() for d in [i1, i2, i3, i4] if d.strip()])
     
     if not drugs:
-        st.warning("Lütfen analiz için en az bir ilaç ismi girin.")
+        st.warning("Lütfen en az bir ilaç girin.")
     else:
         query_id = ", ".join(drugs)
         
-        # 1. KOLEKTİF HAFIZA KONTROLÜ
-        with st.spinner("Kolektif hafıza taranıyor..."):
+        # 1. HAFIZA KONTROLÜ
+        with st.spinner("Hafıza taranıyor..."):
             try:
                 df = conn.read(ttl="5s")
                 existing = df[df['ilaclar'] == query_id]
@@ -101,57 +112,48 @@ if st.button("Klinik Analizi Başlat", type="primary"):
                 df = pd.DataFrame(columns=["ilaclar", "rapor"])
         
         if found:
-            st.success("✅ Bu analiz kolektif hafızadan getirildi (Ücretsiz)")
+            st.success("✅ Hafızadan getirildi (Ücretsiz)")
             st.markdown(existing.iloc[0]['rapor'])
         else:
-            # 2. HAFIZADA YOKSA YENİ ANALİZ
-            if not st.session_state.get("saved_key"):
-                st.error("❌ Bu kombinasyon henüz analiz edilmemiş. Lütfen sol menüden API anahtarınızı girin.")
+            # 2. YENİ ANALİZ
+            user_key = st.session_state.get("saved_key")
+            if not user_key:
+                st.error("❌ Bu kombinasyon hafızada yok. Lütfen sol menüden API anahtarınızı girin.")
             else:
-                with st.spinner("FDA verileri çekiliyor ve YZ raporu hazırlanıyor..."):
+                with st.spinner("FDA taranıyor ve rapor hazırlanıyor..."):
                     fda_metni = ""
                     for d in drugs:
                         m = fda_verisi_cek(d)
                         if m: fda_metni += m
                     
                     if not fda_metni:
-                        st.error("Girdiğiniz ilaçlar FDA veritabanında bulunamadı. Lütfen etken maddeyi kontrol edin.")
+                        st.error("İlaçlar FDA'da bulunamadı. Lütfen etken madde ismiyle (örn: Diclofenac) deneyin.")
                     else:
                         try:
-                            genai.configure(api_key=st.session_state["saved_key"])
+                            genai.configure(api_key=user_api_key if 'user_api_key' in locals() else user_key)
                             model = genai.GenerativeModel('gemini-2.0-flash')
                             
                             prompt = f"""
-                            Sen uzman bir klinik farmakologsun. Sadece şu resmi FDA verilerini kullanarak Türkçe özet hazırla:
-                            {fda_metni}
+                            Sen bir klinik farmakologsun. Sadece şu resmi FDA verilerini kullanarak Türkçe özet hazırla: {fda_metni}
                             
                             Rapor Formatı:
                             1. Etken Madde ve Sınıf
-                            2. Pozoloji (Bebek, Çocuk, Yetişkin, Geriatrik - Ayrı başlıklarla ve veride varsa mg/kg hesabı ile)
-                            3. Gebelik ve Emzirme Riskleri (Kategori belirterek)
-                            4. Önemli Yan Etkiler ve İlaç Etkileşimleri
+                            2. Pozoloji (Bebek, Çocuk, Yetişkin, Geriatrik ayrı ayrı)
+                            3. Gebelik ve Emzirme Riskleri
+                            4. Önemli Yan Etkiler ve Etkileşimler
                             
-                            Önemli: Veride olmayan bilgiyi asla uydurma, 'Veri yok' de.
+                            Not: Veride olmayan bilgiyi uydurma, 'Veri yok' de.
                             """
                             
-                            # 429 Hatası için basit bir retry (tekrar deneme)
-                            for attempt in range(2):
-                                try:
-                                    response = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=0.0))
-                                    rapor = response.text
-                                    st.markdown(rapor)
-                                    
-                                    # 3. YENİ ANALİZİ HAFIZAYA KAYDET
-                                    new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [rapor]})
-                                    df_updated = pd.concat([df, new_row], ignore_index=True)
-                                    conn.update(data=df_updated)
-                                    st.balloons()
-                                    st.info("💡 Analiz tamamlandı ve kolektif hafızaya kaydedildi!")
-                                    break
-                                except Exception as e:
-                                    if "429" in str(e) and attempt == 0:
-                                        time.sleep(3)
-                                        continue
-                                    else: raise e
+                            response = model.generate_content(prompt, generation_config=genai.GenerationConfig(temperature=0.0))
+                            rapor = response.text
+                            st.markdown(rapor)
+                            
+                            # 3. KAYDET
+                            new_row = pd.DataFrame({"ilaclar": [query_id], "rapor": [rapor]})
+                            df_updated = pd.concat([df, new_row], ignore_index=True)
+                            conn.update(data=df_updated)
+                            st.info("💡 Hafızaya eklendi!")
+                            
                         except Exception as e:
-                            st.error(f"Bir hata oluştu: {str(e)}")
+                            st.error(f"Hata: {str(e)}")
