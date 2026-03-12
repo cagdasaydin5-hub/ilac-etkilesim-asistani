@@ -30,7 +30,9 @@ if st.button("Yapay Zeka ile Analiz Et", type="primary"):
         with st.spinner('Yapay zeka tıp literatürünü tarıyor, lütfen bekleyin...'):
             try:
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-1.5-flash') 
+                
+                # GÜNCELLENEN KISIM: Model ismini en stabil versiyon olan 'gemini-pro' yaptık
+                model = genai.GenerativeModel('gemini-pro') 
                 
                 prompt = f"""
                 Sen uzman bir klinik farmakologsun. Bir hekim aşağıdaki ilaçları aynı hastaya reçete etmeyi düşünüyor:
@@ -49,5 +51,4 @@ if st.button("Yapay Zeka ile Analiz Et", type="primary"):
                 st.write(response.text)
                 
             except Exception as e:
-                # HATANIN DETAYINI BURADA YAZDIRIYORUZ
                 st.error(f"Hata Detayı: {str(e)}")
